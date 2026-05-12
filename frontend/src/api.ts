@@ -16,6 +16,9 @@ async function request<T>(path: string, opts?: RequestInit): Promise<T> {
 export const searchLeads = (body: object) =>
   request('/leads/search/apollo', { method: 'POST', body: JSON.stringify(body) })
 
+export const searchGlobal = (body: object) =>
+  request('/leads/search/global', { method: 'POST', body: JSON.stringify(body) })
+
 export const searchHunter = (domain: string, limit = 10) =>
   request(`/leads/search/hunter?domain=${domain}&limit=${limit}`, { method: 'POST' })
 

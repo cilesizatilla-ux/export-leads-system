@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { searchLeads, searchHunter } from '../api'
+import { searchLeads, searchGlobal, searchHunter } from '../api'
 
 const COUNTRIES = [
   { code: 'DE', name: 'Germany' }, { code: 'FR', name: 'France' },
@@ -20,14 +20,14 @@ interface SearchResult {
 }
 
 export default function LeadsPage() {
-  const [tab, setTab] = useState<'pdl' | 'hunter'>('pdl')
+  const [tab, setTab] = useState<'global' | 'pdl' | 'hunter'>('global')
 
-  // PDL form
+  // Shared search state
   const [countries, setCountries] = useState<string[]>([])
   const [industry, setIndustry] = useState('')
   const [keywords, setKeywords] = useState('')
   const [perPage, setPerPage] = useState(10)
-  const [pdlResult, setPdlResult] = useState<SearchResult | null>(null)
+  const [searchResult, setSearchResult] = useState<SearchResult | null>(null)
 
   // Hunter form
   const [domain, setDomain] = useState('')
@@ -39,15 +39,28 @@ export default function LeadsPage() {
   const toggleCountry = (code: string) =>
     setCountries(prev => prev.includes(code) ? prev.filter(c => c !== code) : [...prev, code])
 
-  const runPDL = async () => {
-    setLoading(true); setError(''); setPdlResult(null)
+  const buildBody = (extra: Record<string, unknown> = {}) => {
+    const body: Record<string, unknown> = { save_to_db: true, ...extra }
+    if (countries.length) body.countries = countries
+    if (industry) body.industries = [industry]
+    if (keywords) body.keywords = keywords.split(',').map(k => k.trim()).filter(Boolean)
+    return body
+  }
+
+  const runGlobal = async () => {
+    setLoading(true); setError(''); setSearchResult(null)
     try {
-      const body: Record<string, unknown> = { per_page: perPage, save_to_db: true }
-      if (countries.length) body.countries = countries
-      if (industry) body.industries = [industry]
-      if (keywords) body.keywords = keywords.split(',').map(k => k.trim()).filter(Boolean)
-      const res = await searchLeads(body) as SearchResult
-      setPdlResult(res)
+      const res = await searchGlobal(buildBody()) as SearchResult
+      setSearchResult(res)
+    } catch (e: any) { setError(e.message) }
+    setLoading(false)
+  }
+
+  const runPDL = async () => {
+    setLoading(true); setError(''); setSearchResult(null)
+    try {
+      const res = await searchLeads(buildBody({ per_page: perPage })) as SearchResult
+      setSearchResult(res)
     } catch (e: any) { setError(e.message) }
     setLoading(false)
   }
@@ -68,17 +81,29 @@ export default function LeadsPage() {
 
       {/* Tabs */}
       <div className="flex gap-2">
-        {(['pdl', 'hunter'] as const).map(t => (
-          <button key={t} onClick={() => setTab(t)}
+        {(['global', 'pdl', 'hunter'] as const).map(t => (
+          <button key={t} onClick={() => { setTab(t); setSearchResult(null); setError('') }}
             className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${tab === t ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
-            {t === 'pdl' ? 'Search Companies (PDL)' : 'Find Emails (Hunter)'}
+            {t === 'global' ? '🌍 Global Search (Free)' : t === 'pdl' ? 'PDL Search' : 'Find Emails (Hunter)'}
           </button>
         ))}
       </div>
 
-      {tab === 'pdl' && (
+      {/* Shared search form for Global and PDL tabs */}
+      {(tab === 'global' || tab === 'pdl') && (
         <div className="bg-white rounded-xl border border-slate-200 p-6 space-y-5">
-          <h2 className="font-semibold text-slate-800">People Data Labs — Company Search</h2>
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="font-semibold text-slate-800">
+                {tab === 'global' ? 'Global Company Search — Wikidata' : 'People Data Labs — Company Search'}
+              </h2>
+              {tab === 'global' && (
+                <p className="text-xs text-green-600 mt-0.5">
+                  Free · No API credits · Searches across all countries automatically
+                </p>
+              )}
+            </div>
+          </div>
 
           {/* Countries */}
           <div>
@@ -109,25 +134,27 @@ export default function LeadsPage() {
           </div>
 
           <div className="flex items-center gap-4">
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Results per page</label>
-              <select value={perPage} onChange={e => setPerPage(Number(e.target.value))}
-                className="border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400">
-                {[5, 10, 25, 50].map(n => <option key={n} value={n}>{n}</option>)}
-              </select>
-            </div>
-            <button onClick={runPDL} disabled={loading}
-              className="mt-5 px-5 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors">
-              {loading ? 'Searching…' : 'Search'}
+            {tab === 'pdl' && (
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Results per page</label>
+                <select value={perPage} onChange={e => setPerPage(Number(e.target.value))}
+                  className="border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400">
+                  {[5, 10, 25, 50].map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
+            )}
+            <button onClick={tab === 'global' ? runGlobal : runPDL} disabled={loading}
+              className={`${tab === 'pdl' ? 'mt-5' : ''} px-5 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors`}>
+              {loading ? 'Searching…' : tab === 'global' ? '🌍 Search Globally' : 'Search'}
             </button>
           </div>
 
           {error && <p className="text-red-500 text-sm">{error}</p>}
 
-          {pdlResult && (
+          {searchResult && (
             <div>
               <p className="text-sm text-slate-500 mb-3">
-                Found <strong>{pdlResult.total_found}</strong> companies — <strong>{pdlResult.saved_count}</strong> saved to database
+                Found <strong>{searchResult.total_found}</strong> companies — <strong>{searchResult.saved_count}</strong> saved to database
               </p>
               <div className="overflow-x-auto rounded-lg border border-slate-100">
                 <table className="w-full text-sm">
@@ -139,10 +166,14 @@ export default function LeadsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {pdlResult.companies.map(c => (
+                    {searchResult.companies.map(c => (
                       <tr key={c.id} className="border-t border-slate-100 hover:bg-slate-50">
                         <td className="px-4 py-3 font-medium text-slate-800">{c.name}</td>
-                        <td className="px-4 py-3 text-slate-500">{c.domain || '—'}</td>
+                        <td className="px-4 py-3 text-slate-500">
+                          {c.domain
+                            ? <a href={`https://${c.domain}`} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline">{c.domain}</a>
+                            : '—'}
+                        </td>
                         <td className="px-4 py-3">
                           {c.country_code && (
                             <span className="px-2 py-0.5 bg-slate-100 rounded text-xs font-mono">{c.country_code}</span>

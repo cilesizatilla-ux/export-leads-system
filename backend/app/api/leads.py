@@ -14,6 +14,7 @@ from app.schemas.schemas import (
     CompanyResponse, ContactResponse,
 )
 from app.services.pdl_service import PDLService, get_language_for_country
+from app.services.clearbit_service import ClearbitService, country_code_from_domain, get_language_for_country as cb_language
 from app.services.hunter_service import HunterService
 
 router = APIRouter(prefix="/api/leads", tags=["Leads"])
@@ -22,7 +23,7 @@ router = APIRouter(prefix="/api/leads", tags=["Leads"])
 @router.post("/search/apollo", response_model=LeadSearchResponse)
 async def search_apollo(request: LeadSearchRequest, db: Session = Depends(get_db)):
     """
-    Apollo.io üzerinden şirket arama.
+    PDL üzerinden şirket arama.
     Bulunan şirketler ve kişiler DB'ye kaydedilir.
     """
     try:
@@ -30,7 +31,6 @@ async def search_apollo(request: LeadSearchRequest, db: Session = Depends(get_db
     except ValueError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    # 1) Şirketleri bul
     try:
         companies_data = await pdl.search_organizations(
             keywords=request.keywords,
@@ -53,7 +53,6 @@ async def search_apollo(request: LeadSearchRequest, db: Session = Depends(get_db
         country_code = org.get("country_code") or (org.get("country") or "").upper()[:2]
         language = get_language_for_country(country_code)
 
-        # Daha önce kaydedildi mi?
         existing = db.query(Company).filter(
             Company.domain == org.get("primary_domain")
         ).first()
@@ -83,7 +82,6 @@ async def search_apollo(request: LeadSearchRequest, db: Session = Depends(get_db
         db.add(company)
         db.flush()
 
-        # 2) Hunter ile domain'den email bul (PDL ücretsiz planda email vermez)
         domain = org.get("primary_domain")
         if domain and request.save_to_db:
             try:
@@ -260,3 +258,109 @@ def get_lead_stats(db: Session = Depends(get_db)):
             {"country_code": c[0], "count": c[1]} for c in country_dist
         ],
     }
+
+
+@router.post("/search/global", response_model=LeadSearchResponse)
+async def search_global(request: LeadSearchRequest, db: Session = Depends(get_db)):
+    """
+    Wikidata SPARQL + Hunter.io ile global şirket ve email arama.
+    Tamamen ücretsiz, API key gerektirmez, 200+ ülke desteği.
+    """
+    wikidata = ClearbitService()
+
+    companies_raw = await wikidata.discover(
+        countries=request.countries or [],
+        keywords=request.keywords or [],
+        industries=request.industries or [],
+        limit_per_country=request.per_page,
+    )
+
+    if not companies_raw:
+        return LeadSearchResponse(total_found=0, saved_count=0, companies=[])
+
+    saved_companies: list[Company] = []
+
+    hunter_ok = True
+    try:
+        hunter = HunterService()
+    except ValueError:
+        hunter_ok = False
+
+    for org in companies_raw:
+        domain = org.get("primary_domain")
+        country_code = org.get("country_code") or country_code_from_domain(domain or "", request.countries or [])
+        language = cb_language(country_code)
+
+        existing = db.query(Company).filter(Company.domain == domain).first() if domain else None
+        if existing:
+            saved_companies.append(existing)
+            continue
+
+        if not request.save_to_db:
+            saved_companies.append(org)
+            continue
+
+        company = Company(
+            name=org.get("name"),
+            domain=domain,
+            country_code=country_code,
+            language=language,
+            source="wikidata",
+            raw_data=org,
+        )
+        db.add(company)
+        db.flush()
+
+        if domain and hunter_ok:
+            try:
+                hunter_data = await hunter.domain_search(domain=domain, limit=5)
+                for email_record in hunter_data.get("data", {}).get("emails", []):
+                    email = email_record.get("value")
+                    if not email:
+                        continue
+                    if db.query(Contact).filter(Contact.email == email).first():
+                        continue
+                    contact = Contact(
+                        company_id=company.id,
+                        first_name=email_record.get("first_name"),
+                        last_name=email_record.get("last_name"),
+                        full_name=f"{email_record.get('first_name') or ''} {email_record.get('last_name') or ''}".strip() or None,
+                        title=email_record.get("position"),
+                        department=email_record.get("department"),
+                        email=email,
+                        email_status=email_record.get("verification", {}).get("status"),
+                        linkedin_url=email_record.get("linkedin"),
+                        source="hunter",
+                    )
+                    db.add(contact)
+            except Exception as exc:
+                print(f"Hunter hata ({domain}): {exc}")
+
+        saved_companies.append(company)
+
+    db.commit()
+
+    from datetime import datetime
+    db_companies = [c for c in saved_companies if isinstance(c, Company)]
+    preview_dicts = [c for c in saved_companies if isinstance(c, dict)]
+
+    if db_companies:
+        response_companies = [CompanyResponse.model_validate(c) for c in db_companies]
+    else:
+        response_companies = [
+            CompanyResponse(
+                id=0, created_at=datetime.utcnow(),
+                name=d.get("name") or "",
+                domain=d.get("primary_domain"),
+                website=d.get("website_url"),
+                country_code=d.get("country_code"),
+                language=cb_language(d.get("country_code") or ""),
+            )
+            for d in preview_dicts
+        ]
+
+    return LeadSearchResponse(
+        total_found=len(companies_raw),
+        saved_count=len(db_companies),
+        companies=response_companies,
+    )
